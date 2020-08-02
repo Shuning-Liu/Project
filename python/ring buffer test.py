@@ -78,20 +78,6 @@ class CircularBuffer(object):
 '''
 warnings.filterwarnings('ignore')
 
-def read_data(buffer,readPos):
-    f = open('eeg.csv', 'r')
-    csvreader = csv.reader(f, delimiter=',', quotechar='|')
-    f.seek(readPos,os.SEEK_SET)
-    data = [row for row in csvreader]
-    if len(data) > epochsize*4:
-        data = data[-epochsize:]
-    for ii in range(int(len(data))):
-        buffer.enqueue(data[ii])
-    #print(len(data))
-    readPos = f.tell()
-    f.close()
-    return buffer,readPos
-
 def Hjorth(a):
     first_deriv = np.diff(a)
     second_deriv = np.diff(a,2)
@@ -134,6 +120,23 @@ def SEF(a,freq1,freq2,r):
     spectral_edge_freq = np.interp(max(y_int)*r, y_int, freq)
     return spectral_edge_freq
 
+def read_data(buffer,readPos):
+    f = open('eeg.csv', 'r')
+    csvreader = csv.reader(f, delimiter=',', quotechar='|')
+    f.seek(readPos,os.SEEK_SET)
+    data = [row for row in csvreader]
+    if len(data) > epochsize*4:
+        a = len(data) - epochsize
+        a = a - (a % epochsize)     
+        data = data[a:]      #  从6000的整数倍开始
+    for ii in range(int(len(data))):
+        buffer.enqueue(data[ii])
+    #print(len(data))
+    readPos = f.tell()
+    f.close()
+    return buffer,readPos
+
+
 '''
 ############################## SVM classifer ###############################
 '''
@@ -142,6 +145,7 @@ feature_data = loadmat('feature_data.mat')
 label = feature_data['label'].ravel()
 fs = 200
 feature_matrix_selected = feature_data['feature_selected']
+transition_matrix = feature_data['transition_matrix']
 select_idx_total = feature_data['select_idx_total'].ravel()
 Xtrain = feature_matrix_selected
 svclassifier = SVC(gamma=0.000005,C = 200, kernel='rbf',decision_function_shape='ovr')
@@ -150,25 +154,26 @@ svclassifier.fit(Xtrain, label)
 readPos = 0
 epochsize = 6000
 buffer = CircularBuffer(epochsize*4)
-
+predict = []
 count = 0
 while True:
     buffer,readPos = read_data(buffer,readPos)
-    #print(buffer.size())
-    #print(buffer.head)
-    #print(buffer.tail)
     if buffer.size() >= epochsize:
         pop = []
         for ii in range(epochsize):
             pop.append(buffer.dequeue())
-        #print(buffer.size()) 
-        #print(buffer.head)
-        #print(buffer.tail)
+        #print(count)
         #######################  calculate features #####################
-        epoch = []
+        
+        data_epoch = []
         for ii in range(epochsize):
-            epoch.append(np.array(pop[ii],dtype=float))
-        epoch = np.array(epoch)
+            data_epoch.append(np.array(pop[ii],dtype=float))
+        data_epoch = np.array(data_epoch)   # 到这个位置开始提取 data & hypnogram
+        
+        
+        epoch = data_epoch[:,1:]
+        hypnogram = data_epoch[5,0]      # take the fifth hypnogram as the true state
+        
         K = kurtosis(epoch)
         S = skew(epoch)
         activity = np.zeros(4)
@@ -214,19 +219,35 @@ while True:
         
         ################ prediction ###########################
         y_pred = svclassifier.predict(feature_select)
-        print(y_pred)
+        #print(y_pred)
+        
+        # probability SVC returns by decision function
+        p = np.array(svclassifier.decision_function(feature_select)) # decision is a voting function
+        prob = np.exp(p)/(np.sum(np.exp(p)))
+        prob = prob.ravel()
+        #print(y_pred == hypnogram)
+        #print('The probability for the predicted state is',round(float(prob[y_pred]),3))
+        
+        ##################### conditional prob
+        if count == 0:
+            print(y_pred)
+            print(y_pred == hypnogram)
+            print('The probability for the predicted state is',round(float(prob[y_pred]),3))
+            predict.append(y_pred)            
+        else:
+            label_previous = predict[count - 1]
+            con_prob = np.zeros(4)
+            for q in range(4):
+                con_prob[q] = transition_matrix[label_previous,q] * prob[q]
+            y_pred_con = np.argmax(con_prob)
+            con_prob_normalised = con_prob / sum(con_prob)
+            print(y_pred_con)
+            print(y_pred_con == hypnogram)
+            print('The probability for the predicted state is',round(float(con_prob_normalised[y_pred_con]),3))      
+            predict.append(y_pred_con)
+        count = count + 1
         
 
-
-
-'''
-bb = CircularBuffer(4)
-a = [2,3]
-bb.enqueue(a)
-bb.enqueue(a)
-bb.enqueue(a)
-print(bb)
-'''
 
 
 
